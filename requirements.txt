@@ -1,0 +1,5 @@
+streamlit>=1.39
+opencv-python-headless>=4.8
+numpy
+# для реального инференса на LinQ (в Jupyter на стенде уже есть):
+pika
