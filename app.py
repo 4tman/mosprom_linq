@@ -30,6 +30,9 @@ from processor import (DemoBackend, LinQBackend, SyntheticFrameSource,
                        VideoFrameSource, draw_annotations)
 from storage import EventStorage
 
+from image_panel import render_image_panel
+
+
 st.set_page_config(page_title="Пост контроля безопасности", layout="wide")
 
 SOURCE_SYNTH = "Синтетическая сцена (демо)"
@@ -67,6 +70,26 @@ def init_state() -> None:
 
 init_state()
 ss = st.session_state
+
+from image_panel import render_image_panel
+
+page = st.sidebar.radio(
+    "Раздел",
+    ["Фотография — LinQ", "Видео и демо"],
+)
+
+if page == "Фотография — LinQ":
+    ss.running = False
+
+    if ss.source is not None:
+        if hasattr(ss.source, "close"):
+            ss.source.close()
+
+        ss.source = None
+        ss.source_iter = None
+
+    render_image_panel()
+    st.stop()
 
 
 # ---------------------------------------------------------------------------

@@ -154,19 +154,30 @@ class LinQClient:
                     f"(task_id={task_id})")
             self._chan.basic_ack(method.delivery_tag)
             data, metadata, worker = deserialize(raw)
-            resp_task_id = str(
-                metadata.get(MESSAGE_ID_ATTR_NAME)
-                or metadata.get("task_id") or "")
-            if resp_task_id != task_id:
-                continue  # чужой ответ — ждём свой дальше
+
+            # task_id ищем в заголовках сообщения RabbitMQ.
+            headers = _props.headers or {}
+            resp_task_id = headers.get(MESSAGE_ID_ATTR_NAME)
+
+            if resp_task_id is None:
+                resp_task_id = _props.correlation_id
+
+            if isinstance(resp_task_id, bytes):
+                resp_task_id = resp_task_id.decode("utf-8")
+
+            # Если идентификатор передан, проверяем соответствие.
+            if resp_task_id is not None and str(resp_task_id) != task_id:
+                continue
+
             self._chan.cancel()
             latency_ms = (time.monotonic() - t0) * 1000
+
             return LinQResponse(
                 data=data,
                 metadata=metadata,
                 worker=worker,
                 latency_ms=round(latency_ms, 1),
-                status_ok=(metadata.get("status_code") == 0),
+                status_ok=(worker.get("status_code") == 0),
             )
 
         raise TimeoutError(f"Ответ воркера не пришёл (task_id={task_id})")
