@@ -1,3 +1,23 @@
-data/
+# окружения и кэш
+.venv/
+.venv-linq/
 __pycache__/
 *.pyc
+
+# SDK организаторов
+tpu_sdk/
+
+# данные и результаты
+data/
+*.npz
+calibration/*.png
+calibration/*.jpg
+calibration/*.jpeg
+
+# мусор и секреты
+trash/
+.env
+
+# модели (убери строки, если решишь коммитить)
+*.onnx
+*.tpu

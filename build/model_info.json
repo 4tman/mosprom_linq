@@ -1,0 +1,19 @@
+{
+  "onnx_input_name": "images",
+  "onnx_input_shape": [
+    1,
+    3,
+    640,
+    640
+  ],
+  "onnx_output_names": [
+    "output0"
+  ],
+  "anchors_mapping_repr": "{'images': 'images', 'output0': 'output0'}",
+  "renaming_repr": "{'images': 'images', 'output0': 'output0'}",
+  "tensor_descriptions_repr": "{'images': <tpu_tlm_is.base.tensor_description.TensorDescription object at 0x7584686b4440>, 'output0': <tpu_tlm_is.base.tensor_description.TensorDescription object at 0x75845c78bce0>}",
+  "calibration_images": [
+    "/home/user/safety_panel/calibration/handsome-man-engineer-building-protective-helmet-gray-wall-serious-focused-face_343596-6764 (1).png"
+  ],
+  "preprocessing": "RGB, centered letterbox 640, padding 114, /255, NCHW"
+}
