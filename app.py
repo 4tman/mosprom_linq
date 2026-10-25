@@ -16,6 +16,15 @@ app.py — панель оператора «Пост контроля безо�
 """
 from __future__ import annotations
 
+import threading
+
+import av
+from streamlit_webrtc import (
+    RTCConfiguration,
+    VideoProcessorBase,
+    webrtc_streamer,
+)
+
 import dataclasses
 import tempfile
 import time
@@ -31,6 +40,7 @@ from processor import (DemoBackend, LinQBackend, SyntheticFrameSource,
 from storage import EventStorage
 
 from image_panel import render_image_panel
+
 
 
 st.set_page_config(page_title="Пост контроля безопасности", layout="wide")
@@ -71,7 +81,376 @@ def init_state() -> None:
 init_state()
 ss = st.session_state
 
-from image_panel import render_image_panel
+# ---------------------------------------------------------------------------
+# Видеопоток: веб-камера браузера / сетевой RTSP или HTTP
+# ---------------------------------------------------------------------------
+def process_live_frame(frame, frame_id=0):
+    """
+    Используем существующий LinQBackend.
+
+    Клиент создаётся и закрывается в том же потоке,
+    в котором выполняется запрос.
+    """
+    backend = LinQBackend()
+
+    try:
+        result = backend.process(frame, frame_id)
+    finally:
+        backend.close()
+
+    annotated = frame.copy()
+
+    for detection in result.detections:
+        x1, y1, x2, y2 = map(int, detection["bbox"])
+
+        label = str(detection["label"])
+        display_label = label.encode(
+            "ascii", errors="replace"
+        ).decode("ascii")
+
+        confidence = float(detection["confidence"])
+
+        cv2.rectangle(
+            annotated,
+            (x1, y1),
+            (x2, y2),
+            (0, 255, 255),
+            2,
+        )
+
+        cv2.putText(
+            annotated,
+            f"{display_label} {confidence:.2f}",
+            (x1, max(20, y1 - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+        )
+
+    return annotated, {
+        "detections": result.detections,
+        "latency_ms": float(result.latency_ms),
+        "worker": result.worker,
+    }
+
+
+class LiveCameraProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.process_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+
+        self.frame_id = 0
+        self.stats = None
+        self.error = ""
+
+    def recv(self, frame):
+        image = frame.to_ndarray(format="bgr24")
+
+        with self.process_lock:
+            try:
+                annotated, stats = process_live_frame(
+                    image,
+                    self.frame_id,
+                )
+
+                self.frame_id += 1
+
+                with self.state_lock:
+                    self.stats = stats
+                    self.error = ""
+
+            except Exception as exc:
+                annotated = image.copy()
+
+                with self.state_lock:
+                    self.error = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+
+                cv2.putText(
+                    annotated,
+                    "LinQ error - see panel",
+                    (15, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2,
+                )
+
+        return av.VideoFrame.from_ndarray(
+            annotated,
+            format="bgr24",
+        )
+
+    def snapshot(self):
+        with self.state_lock:
+            return self.stats, self.error
+
+
+class LiveNetworkSource:
+    """
+    Читает поток в фоне.
+
+    Сохраняет только последний кадр, а не очередь кадров,
+    накопившихся во время запроса к LinQ.
+    """
+
+    def __init__(self, url):
+        self.url = url
+        self.lock = threading.Lock()
+        self.stop_event = threading.Event()
+
+        self.frame = None
+        self.frame_id = 0
+        self.error = ""
+
+        self.thread = threading.Thread(
+            target=self._read_loop,
+            daemon=True,
+        )
+        self.thread.start()
+
+    def _read_loop(self):
+        cap = cv2.VideoCapture()
+
+        try:
+            opened = cap.open(
+                self.url,
+                cv2.CAP_FFMPEG,
+                [
+                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                    10000,
+                    cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                    5000,
+                ],
+            )
+
+            if not opened:
+                raise RuntimeError("open failed")
+
+            while not self.stop_event.is_set():
+                ok, frame = cap.read()
+
+                if not ok:
+                    raise RuntimeError("read failed")
+
+                with self.lock:
+                    self.frame = frame
+                    self.frame_id += 1
+
+        except Exception:
+            with self.lock:
+                # Не показываем URL: он может содержать пароль.
+                self.error = (
+                    "Не удалось открыть или прочитать поток. "
+                    "Проверьте адрес, сеть и поддержку "
+                    "формата потока в OpenCV/FFmpeg."
+                )
+
+        finally:
+            cap.release()
+
+    def latest(self):
+        with self.lock:
+            return (
+                self.frame_id,
+                None if self.frame is None else self.frame.copy(),
+                self.error,
+            )
+
+    def close(self):
+        self.stop_event.set()
+        self.thread.join(timeout=0.2)
+
+
+def close_live_network():
+    source = st.session_state.get("_network_source")
+
+    if source is not None:
+        source.close()
+
+    st.session_state["_network_source"] = None
+    st.session_state.pop("_network_result", None)
+    st.session_state.pop("_network_last_id", None)
+
+
+def show_live_stats(stats):
+    left, right = st.columns(2)
+
+    left.metric(
+        "Объектов в кадре",
+        len(stats["detections"]),
+    )
+
+    right.metric(
+        "Запрос LinQ, мс",
+        f'{stats["latency_ms"]:.0f}',
+    )
+
+    if stats["detections"]:
+        st.dataframe(
+            stats["detections"],
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Объекты выше порога уверенности не найдены.")
+
+
+def render_live_panel():
+    st.title("Видеопоток — LinQ")
+
+    st.caption(
+        "Реальные детекции модели. "
+        "В этом разделе нарушения в журнал пока не записываются."
+    )
+
+    mode = st.radio(
+        "Источник видеопотока",
+        ["Веб-камера браузера", "Сетевой поток"],
+        key="live_source_mode",
+    )
+
+    if mode == "Веб-камера браузера":
+        close_live_network()
+
+        st.info(
+            "Нажмите START и разрешите доступ к камере. "
+            "Перед уходом из раздела нажмите STOP."
+        )
+
+        ctx = webrtc_streamer(
+            key="integrated-linq-camera",
+            video_processor_factory=LiveCameraProcessor,
+            rtc_configuration=RTCConfiguration(
+                {
+                    "iceServers": [
+                        {
+                            "urls": [
+                                "stun:stun.l.google.com:19302"
+                            ]
+                        }
+                    ]
+                }
+            ),
+            media_stream_constraints={
+                "video": True,
+                "audio": False,
+            },
+            async_processing=True,
+        )
+
+        @st.fragment(run_every=1.0)
+        def camera_status():
+            processor = ctx.video_processor
+
+            if processor is None:
+                st.caption("Камера не запущена.")
+                return
+
+            stats, error = processor.snapshot()
+
+            if error:
+                st.error(error)
+
+            if stats is not None:
+                show_live_stats(stats)
+            else:
+                st.caption("Ожидаем первый ответ LinQ…")
+
+        camera_status()
+        return
+
+    # Сетевой поток
+    url = st.text_input(
+        "Прямой адрес RTSP / HTTP",
+        type="password",
+        placeholder="rtsp://адрес:554/путь",
+        key="live_stream_url",
+    )
+
+    start_col, stop_col = st.columns(2)
+
+    if start_col.button(
+        "Подключить поток",
+        type="primary",
+        key="connect_live_stream",
+    ):
+        address = url.strip()
+
+        if not address.startswith(
+            ("rtsp://", "rtsps://", "http://", "https://")
+        ):
+            st.error("Укажите RTSP или HTTP(S) адрес.")
+        else:
+            close_live_network()
+
+            st.session_state["_network_source"] = (
+                LiveNetworkSource(address)
+            )
+            st.session_state["_network_last_id"] = -1
+
+    if stop_col.button(
+        "Отключить поток",
+        key="disconnect_live_stream",
+    ):
+        close_live_network()
+
+    @st.fragment(run_every=1.0)
+    def network_status():
+        source = st.session_state.get("_network_source")
+
+        if source is None:
+            st.info(
+                "Введите адрес и нажмите «Подключить поток»."
+            )
+            return
+
+        frame_id, frame, error = source.latest()
+
+        if error:
+            st.error(error)
+            return
+
+        if frame is None:
+            st.info("Ожидаем первый кадр…")
+            return
+
+        if frame_id != st.session_state.get("_network_last_id"):
+            try:
+                with st.spinner("Обработка на LinQ…"):
+                    annotated, stats = process_live_frame(
+                        frame,
+                        frame_id,
+                    )
+
+                st.session_state["_network_result"] = (
+                    annotated,
+                    stats,
+                )
+
+                st.session_state["_network_last_id"] = frame_id
+
+            except Exception as exc:
+                st.error(f"{type(exc).__name__}: {exc}")
+                return
+
+        result = st.session_state.get("_network_result")
+
+        if result is not None:
+            annotated, stats = result
+
+            st.image(
+                cv2.cvtColor(
+                    annotated,
+                    cv2.COLOR_BGR2RGB,
+                )
+            )
+
+            show_live_stats(stats)
+
+    network_status()
 
 page = st.sidebar.radio(
     "Раздел",
@@ -104,9 +483,7 @@ with st.sidebar:
         uploaded = st.file_uploader(
             "Видеофайл", type=["mp4", "avi", "mov", "mkv"])
 
-    backend_mode = st.radio(
-        "Обработчик", [BACKEND_DEMO, BACKEND_LINQ],
-        help="LinQ подключим, когда будет .tpu-программа модели")
+    st.caption("Обработчик: LinQ — реальная модель SafetyVision")
 
     confirm_s = st.slider(
         "Подтверждение нарушения, сек", 1.0, 6.0, 2.0, 0.5,
@@ -155,12 +532,8 @@ if start_pressed:
             rule = dataclasses.replace(
                 DEFAULT_RULE, confirm_seconds=confirm_s, clear_seconds=clear_s)
             ss.tracker = EventTracker(rule=rule)
-            if backend_mode == BACKEND_DEMO:
-                ss.backend = DemoBackend()
-                ss.backend_name = "demo"
-            else:
-                ss.backend = LinQBackend()
-                ss.backend_name = "linq"
+            ss.backend = LinQBackend()
+            ss.backend_name = "linq"
             ss.frame_id = 0
             ss.running = True
     except (RuntimeError, ValueError) as e:  # например, видео не открылось
@@ -182,10 +555,6 @@ if ss.backend_name == "demo":
     st.warning(
         "ДЕМО-режим: детекции скриптовые, реальное видео НЕ анализируется. "
         "Так собираем интерфейс до подключения модели на LinQ.")
-elif ss.backend_name == "linq":
-    st.info(
-        "LinQ-бэкенд ещё НЕ подключён: заполните LinQBackend.process в "
-        "processor.py по образцу example.ipynb со стенда (см. README).")
 
 
 # ---------------------------------------------------------------------------
