@@ -364,17 +364,11 @@ class LinQBackend:
 
 
 # ---------------------------------------------------------------------------
-# Отрисовка аннотаций
+# Отрисовка аннотаций(демо)
 # ---------------------------------------------------------------------------
 def draw_annotations(frame: np.ndarray, detections: list, rule) -> np.ndarray:
-    """Рисует на КОПИИ кадра полигон зоны правила и рамки детекций."""
+    """Рисует на КОПИИ кадра рамки детекций."""
     out = frame.copy()
-    h, w = out.shape[:2]
-    pts = np.array([[int(x * w), int(y * h)] for x, y in rule.zone],
-                   dtype=np.int32)
-    cv2.polylines(out, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
-    # подпись зоны не рисуем: OpenCV не выводит кириллицу,
-    # а легенда по-русски есть в интерфейсе рядом с кадром
     for d in detections:
         x1, y1, x2, y2 = map(int, d["bbox"])
         cv2.rectangle(out, (x1, y1), (x2, y2), (0, 255, 255), 2)

@@ -73,7 +73,7 @@ app.py (Streamlit)
 ## Установка
 
 ```bash
-git clone <адрес-репозитория> safety_panel
+git clone https://github.com/4tman/mosprom_linq.git safety_panel
 cd safety_panel
 
 # окружение (через uv; можно и python -m venv)
@@ -102,7 +102,7 @@ LinQConfig(
 )
 ```
 
-Адрес брокера (`host`, `port`) задан в `LinQConfig` в `linq_client.py`. Пароли и токены в код не пишем: если они понадобятся, выносим их в переменные окружения или `.env` (он в `.gitignore`).
+Адрес брокера (`host`, `port`) задан в `LinQConfig` в `linq_client.py`.
 
 ## Использование
 
